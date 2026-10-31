@@ -438,6 +438,7 @@ function resolve(code) {
     : { goal: 'gol do rival', save: 'que defesa!', post: 'salvo pela trave', bar: 'salvo pelo travessão', wide: 'ele chutou pra fora', over: 'ele isolou' };
   setStatus(text[code]);
   if (goal) sound(you ? 'goal' : 'miss', .6, .12);
+  if (goal && you && window.PPFX && !STILL) { const p = P3(0, GB, 0); window.PPFX.confetti(p.sx, p.sy); }
   else if (code === 'save') sound(you ? 'miss' : 'goal', .6, .1);
   else if (!you) sound('goal', .6, .3);
 }
@@ -638,6 +639,7 @@ function draw() {
     const p = P3(0, GB, GH + .5);
     drawArrow(p.sx, p.sy, G.time);
   }
+  if (window.PPFX) window.PPFX.draw(G.time); // pixelfx overlay, loaded as a module below
   ctx.putImageData(image, 0, 0);
 }
 
@@ -768,6 +770,30 @@ function frame(now) {
 }
 requestAnimationFrame(frame);
 window.__penalti = { G, K, step(dt, skipDraw) { update(dt); if (!skipDraw) draw(); } };
+</script>
+<script type="module">
+// Effects from pixelfx (https://github.com/patch-gg/pixelfx, MIT). They draw into their own color + light
+// buffers, which are composited over the game's pixels just before the frame goes to the canvas.
+import { createFrame, clearFrame, createFx, composite } from '../vendor/pixelfx/core/index.js';
+import * as confetti from '../vendor/pixelfx/fx/ui/confetti.js';
+
+const frame = createFrame(W, H), live = [];
+let last = null;
+window.PPFX = {
+  // the effect's two poppers sit 74px either side of its origin: just outside the posts
+  confetti(x, y) {
+    live.push(createFx(confetti, { x: Math.round(x), y: Math.round(y), seed: Math.random() * 1e6 | 0, light: .45 }));
+  },
+  draw(time) {
+    const dt = last === null ? 0 : Math.min(.05, Math.max(0, time - last));
+    last = time;
+    if (!live.length) return;
+    clearFrame(frame);
+    for (const fx of live) { fx.update(dt); fx.draw(frame); }
+    composite(frame, image.data, pix); // pix aliases image.data; composite reads each pixel before writing it
+    for (let i = live.length - 1; i >= 0; i--) if (live[i].done()) live.splice(i, 1);
+  },
+};
 </script>
 </body>
 </html>
