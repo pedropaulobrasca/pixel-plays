@@ -4,6 +4,7 @@ window.PixelPlays = (() => {
   // add a game here and give it a folder; `soon` entries show in the menu but do not link
   const GAMES = [
     { id: 'penalti', title: 'Pênalti' },
+    { id: 'quadra', title: 'Quadra NY' },
   ];
   const MUSIC_VOLUME = .4;
   const CREDITS = [

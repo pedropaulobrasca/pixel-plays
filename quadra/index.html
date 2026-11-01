@@ -1,0 +1,768 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Quadra NY</title>
+<style>
+  :root { --ink: #1c1b19; --muted: #8b877f; --paper: #fff; --hot: #d0602c; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--paper); color: var(--ink); }
+  body { font: 13px/1.35 ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: grid; place-items: center; }
+  canvas { display: block; image-rendering: pixelated; touch-action: none; cursor: grab; outline: none; }
+  canvas:active { cursor: grabbing; }
+  .hud { position: fixed; left: max(16px, env(safe-area-inset-left)); right: max(16px, env(safe-area-inset-right)); display: flex; justify-content: space-between; gap: 16px; pointer-events: none; }
+  #top { position: fixed; top: max(14px, env(safe-area-inset-top)); left: max(16px, env(safe-area-inset-left)); display: grid; gap: 2px; pointer-events: none; }
+  #top .row { display: flex; align-items: baseline; gap: 8px; }
+  #score { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--hot); }
+  #clock { font-variant-numeric: tabular-nums; }
+  #clock.low { color: var(--hot); }
+  #best { color: var(--muted); }
+  #bottom { bottom: max(14px, env(safe-area-inset-bottom)); align-items: flex-end; }
+  #status { color: var(--muted); }
+  button { pointer-events: auto; font: inherit; color: var(--muted); background: none; border: 0; padding: 10px; margin: -10px; cursor: pointer; }
+  button:hover, button:focus-visible { color: var(--ink); }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c" tabindex="0" aria-label="Quadra de basquete em Nova York. Arraste para trás e solte para arremessar, ou segure espaço."></canvas></div>
+<div id="top">
+  <div class="row"><b id="score">0</b><span id="clock">60s</span></div>
+  <div class="row"><span id="best">recorde 0</span></div>
+</div>
+<div class="hud" id="bottom">
+  <div id="status" role="status" aria-live="polite"></div>
+  <button id="mute" type="button" aria-pressed="false">som ligado</button>
+</div>
+<script src="../shell.js"></script>
+<script>
+PixelPlays.mount({
+  id: 'quadra',
+  rules: [
+    'Você tem 60 segundos pra fazer o máximo de pontos. O relógio começa no primeiro arremesso.',
+    'Arraste pra trás e solte pra arremessar. Quanto mais longe puxar, mais forte. Os pontinhos mostram o começo da trajetória. Teclado: segure espaço e solte quando a força estiver certa.',
+    'De dentro do arco vale 2, de fora vale 3. Três cestas seguidas e você pega fogo: cada cesta vale +1 até errar.',
+    'O marcador pula pra tocar a bola. Espere ele cair antes de arremessar.',
+  ],
+});
+</script>
+<script>window.PP_SCENE = { originY: 32, shadowX: .8, shadowY: -.3 };</script>
+<script src="../engine.js"></script>
+<script>
+'use strict';
+
+/* ---------- the block ---------- */
+const WALL_Y = -10, WALL_X = -11, A_H = 6.8, B_H = 6, BACK = 3;
+const SIDE_X = 10.4, STREET_Y0 = 7.6, STREET_Y1 = 10, WALK_Y = 5.8;
+const COURT_X0 = -10.6, COURT_X1 = 8.1, BASE_Y = -9.6, FENCE_X = 8.3, FENCE_H = 3.4;
+const HX = -1, HY = -7.35, RZ = 4.3, RIM_R = .34, BALL_R = .19, TUBE = .045;
+const BOARD_Y = -7.9, BOARD_HW = 1.25, BOARD_Z0 = 3.95, BOARD_Z1 = 5.45;
+const KEY_HW = 2.4, FT_Y = BASE_Y + 8.2, R3 = 9.4, GRAV = 12, ELEV = 55 * Math.PI / 180;
+const GAME_T = 60, SHOOT_T = .42, RELEASE_U = .42, MOVE_T = .5;
+
+const YOU = { shirt: [238, 234, 224], stripe: [238, 234, 224], shorts: [196, 58, 46], socks: [238, 234, 224], skin: [176, 122, 88], hair: [24, 20, 18] };
+const DEF = { shirt: [44, 50, 64], stripe: [44, 50, 64], shorts: [44, 50, 64], socks: [230, 230, 224], skin: [222, 170, 132], hair: [92, 60, 36] };
+const BOOT = [34, 32, 30], BALL_C = [212, 104, 44], RIM_C = [218, 92, 36], IRON = [54, 52, 58];
+const BRICK_A = [150, 70, 54], BRICK_B = [170, 124, 88], STONE = [212, 204, 186], ROOF = [74, 72, 76];
+const NET_C = rgb(238, 238, 232), SEAM = rgb(64, 30, 18), FIRE = [rgb(255, 236, 140), rgb(255, 170, 40), rgb(230, 90, 30)];
+
+/* ---------- ground ---------- */
+const KIND_COURT = 1, KIND_LINE = 2, KIND_WALK = 4, KIND_STREET = 5;
+const COURT = [[52, 78, 106], [57, 84, 113], [62, 90, 120], [67, 96, 127]];
+const PAINT = [[146, 66, 54], [154, 72, 58], [162, 78, 62], [170, 84, 66]];
+const ASPHALT = [[56, 56, 60], [62, 62, 66], [68, 68, 72], [74, 74, 78]];
+const CONCRETE = [[164, 160, 152], [174, 170, 162], [184, 180, 172], [194, 190, 182]];
+const LINE = rgb(232, 230, 218), YELLOW_LINE = rgb(226, 186, 60);
+const tone = (set, v, ix, iy) => rgb(...set[clamp(Math.floor(v * 4 + (bayerAt(ix, iy) - .5) * .6), 0, 3)]);
+function courtLine(x, y) {
+  const w = .075;
+  if (x < COURT_X0 - w || x > COURT_X1 + w || y < BASE_Y - w || y > 5.6 + w) return false;
+  if (Math.abs(x - COURT_X0) < w || Math.abs(x - COURT_X1) < w || Math.abs(y - BASE_Y) < w || Math.abs(y - 5.6) < w) return true;
+  const kx = Math.abs(x - HX);
+  if (y < FT_Y + w && (Math.abs(kx - KEY_HW) < w && y > BASE_Y)) return true;
+  if (Math.abs(y - FT_Y) < w && kx < KEY_HW) return true;
+  const ft = Math.hypot(x - HX, y - FT_Y);
+  if (y > FT_Y && Math.abs(ft - 1.8) < w) return true;
+  const r = Math.hypot(x - HX, y - HY);
+  if (y > HY && Math.abs(r - R3) < w) return true;
+  return y <= HY && y > BASE_Y && Math.abs(kx - R3) < w;
+}
+function groundColor(x, y, ix, iy, i) {
+  if (x < WALL_X && y < WALK_Y + 1.6) return 0;
+  if (y < WALL_Y) return 0;
+  const edge = Math.max((x - SIDE_X) / .9, (y - STREET_Y1) / .9, (-13.4 - x) / .9);
+  const rough = edge + (noise(x * 1.4, y * 1.4) - .5) * .9;
+  if (rough > .6) return 0;
+  if (rough > -.2 && hash(ix, iy) < (rough + .2) / .8) return 0;
+  const fine = hash(ix, iy);
+  if (y > STREET_Y0) { // the street
+    kinds[i] = KIND_STREET;
+    if (Math.abs(y - 9.55) < .06 && (Math.floor(x / 1.3) & 1) && fine > .12) return YELLOW_LINE;
+    const v = .45 + (noise(x * .6, y * .8) - .5) * .5 + (fine - .5) * .3 - (Math.abs(noise(x * .4 + 9, y * .4) - .5) < .012 ? .5 : 0);
+    return tone(ASPHALT, v, ix, iy);
+  }
+  if (y > WALK_Y || x > FENCE_X) { // sidewalk slabs and the kerb
+    kinds[i] = KIND_WALK;
+    if (y > STREET_Y0 - .2) return tone(CONCRETE, .95, ix, iy);
+    const sx = x > FENCE_X ? y : x, joint = Math.abs(sx / 1.6 - Math.round(sx / 1.6)) * 1.6 < .05;
+    const v = .55 + (noise(x * .9, y * .9) - .5) * .4 + (fine - .5) * .2 - (joint ? .45 : 0);
+    return tone(CONCRETE, v, ix, iy);
+  }
+  if (courtLine(x, y) && fine > .08) { kinds[i] = KIND_LINE; return LINE; }
+  const crack = Math.abs(noise(x * .5 + 3, y * .5) - .5) < .011;
+  const inCourt = x > COURT_X0 && x < COURT_X1 && y > BASE_Y && y < 5.6;
+  kinds[i] = KIND_COURT;
+  const v = .5 + (noise(x * .7, y * .7) - .5) * .5 + (fine - .5) * .22 - (crack ? .55 : 0);
+  if (!inCourt) return tone(ASPHALT, v, ix, iy);
+  if (Math.abs(x - HX) < KEY_HW && y < FT_Y) return tone(PAINT, v, ix, iy);
+  return tone(COURT, v, ix, iy);
+}
+
+/* ---------- painting walls ----------
+   The camera sees three kinds of face: tops, faces looking +y (down-left) and faces looking +x (down-right). */
+function paintAt(x, y, z, color) {
+  const p = project(x, y, z), ix = p.sx | 0, iy = p.sy | 0;
+  if (ix < 0 || iy < 0 || ix >= W || iy >= H) return;
+  const i = iy * W + ix;
+  if (p.d <= zb[i]) return;
+  zb[i] = p.d;
+  pix[i] = typeof color === 'function' ? color(ix, iy) : color;
+}
+const STEP = .045;
+function faceY(y, x0, x1, z0, z1, shader) {
+  for (let x = x0; x <= x1; x += STEP) for (let z = z0; z <= z1; z += STEP) { const c = shader(x, z); if (c != null) paintAt(x, y, z, c); }
+}
+function faceX(x, y0, y1, z0, z1, shader) {
+  for (let y = y0; y <= y1; y += STEP) for (let z = z0; z <= z1; z += STEP) { const c = shader(y, z); if (c != null) paintAt(x, y, z, c); }
+}
+function faceTop(x0, x1, y0, y1, z, shader) {
+  for (let x = x0; x <= x1; x += STEP) for (let y = y0; y <= y1; y += STEP) { const c = shader(x, y); if (c != null) paintAt(x, y, z, c); }
+}
+// face light: +y faces sit mid ramp, +x faces darker, tops brightest
+const LIT = { y: 2.25, x: 1.25, top: 3.2 };
+function brick(base, face, seed) {
+  const ramp = rampOf(base), mortar = rampOf([176, 164, 148]);
+  return (s, z) => {
+    const row = Math.floor(z / .3), off = row & 1 ? .35 : 0, col = Math.floor((s + off) / .7);
+    const isMortar = z - row * .3 < .075 || s + off - col * .7 < .07;
+    const lv = LIT[face] + (isMortar ? -.2 : (hash(col + seed, row) - .5) * 1.1);
+    const r = isMortar ? mortar : ramp;
+    return (ix, iy) => r[clamp(Math.floor(lv + (bayerAt(ix, iy) - .5) * .6), 0, 4)];
+  };
+}
+const GLASS = [rgb(38, 46, 62), rgb(58, 68, 88), rgb(104, 120, 142)], CURTAIN = [rgb(176, 146, 98), rgb(150, 86, 74), rgb(206, 196, 168)];
+// a facade: brick with a grid of sash windows, stone sills and lintels from the second storey up
+function facade(base, face, seed, s0, height, ground) {
+  const wall = brick(base, face, seed), stone = rampOf(STONE);
+  const sl = clamp(Math.floor(LIT[face] + .6), 0, 4), fr = rgb(...STONE.map(v => v * (face === 'x' ? .72 : .9)));
+  return (s, z) => {
+    if (z > height - .4) return (ix, iy) => stone[clamp(Math.floor(LIT[face] + .4 + (bayerAt(ix, iy) - .5) * .5), 0, 4)];
+    if (ground && z < 2.4) { const g = ground(s, z); if (g != null) return g; }
+    const col = Math.floor((s - s0) / 2), ls = s - s0 - col * 2, fl = Math.floor((z - 2.5) / 2.05), lz = z - 2.5 - fl * 2.05;
+    if (z > 2.5 && z < height - .7) {
+      if (ls > .4 && ls < 1.6 && lz > .1 && lz < .2) return stone[sl];
+      if (ls > .45 && ls < 1.55 && lz > 1.62 && lz < 1.76) return stone[sl];
+      if (ls > .5 && ls < 1.5 && lz > .2 && lz < 1.62) {
+        if (ls < .58 || ls > 1.42 || lz < .27 || lz > 1.55 || Math.abs(lz - .9) < .04) return fr;
+        const h = hash(col + seed, fl * 3);
+        if (h > .72 && lz > .9) return CURTAIN[(h * 30 | 0) % 3];
+        return (ls * 1.3 + lz * .9 + col * .37) % 1.6 < .22 ? GLASS[2] : lz > 1.1 ? GLASS[1] : GLASS[0];
+      }
+    }
+    return wall(s, z);
+  };
+}
+// the mural behind the court: cool tones on purpose, so the orange ball always pops against it
+function mural(x, z) {
+  if (x < -8.6 || x > 5.4 || z < .35 || z > 2.25) return null;
+  if (x < -8.5 || x > 5.3 || z < .45 || z > 2.15) return rgb(40, 34, 40);
+  const n = noise(x * .42 + 3, z * 1.1), m = noise(x * 1.3, z * 2.2 + 7);
+  if (n > .6) return m > .62 ? rgb(246, 244, 230) : rgb(150, 214, 92);
+  if (n > .56) return rgb(34, 28, 36);
+  if (n < .3 && m > .55) return rgb(236, 220, 96);
+  const t = (z - .45) / 1.7;
+  return (ix, iy) => (t + (bayerAt(ix, iy) - .5) * .25 > .5 ? rgb(70, 168, 176) : rgb(84, 82, 156));
+}
+function solidTop(c) { const r = rampOf(c); return (x, y) => (ix, iy) => r[clamp(Math.floor(LIT.top + (hash(ix, iy) - .5) * .8 + (bayerAt(ix, iy) - .5) * .5), 0, 4)]; }
+
+/* ---------- people ---------- */
+// A player from capsules, facing (fx, fy); roll tips the body around the hip. Returns both hands.
+function rig(px, py, fx, fy, p, pal) {
+  const sx = fy, sy = -fx, cr = Math.cos(p.roll || 0), sr = Math.sin(p.roll || 0);
+  const leg = (sg, th, kn, sp) => {
+    const cs = Math.cos(sp), ss = Math.sin(sp) * sg, hip = [0, sg * .15, 0];
+    const knee = [Math.sin(th) * cs * .62, hip[1] + ss * .62, -Math.cos(th) * cs * .62];
+    const foot = [knee[0] + Math.sin(th - kn) * cs * .6, knee[1] + ss * .6, knee[2] - Math.cos(th - kn) * cs * .6];
+    const toe = [foot[0] + Math.cos(th - kn) * .17, foot[1], foot[2] + Math.sin(th - kn) * .17 - .04];
+    return [hip, knee, foot, toe];
+  };
+  const L = leg(1, p.thL || 0, p.knL ?? .06, p.spL ?? .05), R = leg(-1, p.thR || 0, p.knR ?? .06, p.spR ?? .05);
+  const turn = ([f, s, u]) => [f, s * cr + u * sr, -s * sr + u * cr];
+  const hs = p.shift || 0, hz = .1 - Math.min(turn(L[2])[2], turn(R[2])[2]) + (p.z || 0);
+  const WP = q => { const [f, s, u] = turn(q); return [px + fx * f + sx * (s + hs), py + fy * f + sy * (s + hs), hz + u]; };
+  const add = (q0, q1, r0, r1, c) => dynamicAdd(WP(q0), WP(q1), r0, r1, typeof c === 'function' ? c : () => c);
+  for (const [hip, knee, foot, toe] of [L, R]) {
+    add(hip, knee, .17, .14, pal.shorts);
+    add(knee, foot, .13, .1, pal.socks);
+    add(foot, toe, .1, .09, BOOT);
+  }
+  const lean = p.lean || 0, ls = Math.sin(lean), lc = Math.cos(lean);
+  const neck = [ls * 1.03, 0, lc * 1.03], head = [ls * 1.32, 0, lc * 1.32], hair = [head[0] - .06, 0, head[2] + .08];
+  add([0, 0, 0], neck, .3, .32, pal.shirt);
+  add(neck, head, .11, .12, pal.skin);
+  add(head, head, .24, .24, pal.skin);
+  add(hair, hair, .205, .205, pal.hair);
+  const arm = (sg, al, be, bn) => {
+    const sh = [ls * .92, sg * .36, lc * .92 - .03];
+    const d1 = [Math.sin(al) * Math.cos(be), sg * Math.sin(be), -Math.cos(al) * Math.cos(be)];
+    const d2 = [Math.sin(al + bn) * Math.cos(be), sg * Math.sin(be), -Math.cos(al + bn) * Math.cos(be)];
+    const el = sh.map((v, k) => v + d1[k] * .46), hand = el.map((v, k) => v + d2[k] * .44);
+    add(sh, el, .12, .1, pal.skin);
+    add(el, hand, .09, .08, pal.skin);
+    return WP(hand);
+  };
+  return { hL: arm(1, p.alL ?? .05, p.beL ?? .14, p.bnL ?? .15), hR: arm(-1, p.alR ?? .05, p.beR ?? .14, p.bnR ?? .15) };
+}
+
+/* ---------- bake ---------- */
+function bake() {
+  zb.fill(-1e9);
+  pix.fill(rgb(255, 255, 255));
+  for (let iy = 0; iy < H; iy++) for (let ix = 0; ix < W; ix++) {
+    const g = unproject(ix + .5, iy + .5), i = iy * W + ix, c = groundColor(g.x, g.y, ix, iy, i);
+    if (!c) continue;
+    pix[i] = c; ground[i] = 1;
+    zb[i] = (g.x + g.y) / R2 * COS;
+  }
+  growGrass();
+  groundZ.set(zb);
+  pendingShadows.length = 0;
+
+  // building A along the back, the hoop hangs off it
+  faceTop(WALL_X, SIDE_X, WALL_Y - BACK, WALL_Y, A_H, solidTop(ROOF));
+  faceY(WALL_Y, WALL_X, SIDE_X, 0, A_H, facade(BRICK_A, 'y', 0, -10.2, A_H, mural));
+  faceX(SIDE_X, WALL_Y - BACK, WALL_Y, 0, A_H, brick(BRICK_A, 'x', 5));
+  box(WALL_X, WALL_Y, A_H - .4, SIDE_X, WALL_Y + .22, A_H, STONE, 3); // cornice
+  // window air conditioners
+  for (let col = 0; col < 11; col++) for (let fl = 0; fl < 2; fl++) {
+    if (hash(col * 7, fl + 3) < .62) continue;
+    const x = -10.2 + col * 2 + 1, z = 2.5 + fl * 2.05 + .02;
+    if (Math.abs(x - HX) < 1.8 && fl === 1) continue;
+    box(x - .34, WALL_Y, z - .34, x + .34, WALL_Y + .42, z + .06, [196, 194, 186], col);
+  }
+  // building B down the left: brownstone with a fire escape
+  faceTop(WALL_X - BACK, WALL_X, WALL_Y - BACK, WALK_Y + 1.6, B_H, solidTop([90, 80, 76]));
+  faceX(WALL_X, WALL_Y, WALK_Y + 1.6, 0, B_H, facade(BRICK_B, 'x', 9, -9.6, B_H, null));
+  faceY(WALK_Y + 1.6, WALL_X - BACK, WALL_X, 0, B_H, brick(BRICK_B, 'y', 13));
+  box(WALL_X, WALL_Y, B_H - .4, WALL_X + .22, WALK_Y + 1.6, B_H, STONE, 4);
+  fireEscape();
+  waterTower(-5.4, -11.6, A_H);
+  box(2.5, -12.2, A_H, 3.6, -11.2, A_H + .7, [150, 150, 146], 8); // roof vent box
+  box(6.4, -11.9, A_H, 7.2, -11.3, A_H + .5, [150, 150, 146], 9);
+  fence();
+  hoop();
+  props();
+  growTree(1.6, 6.9, .8, 300, 40);
+  // the buildings' long shadows across the court
+  for (let y = WALL_Y; y <= WALK_Y + 1.6; y += .35) for (let z = .3; z <= B_H; z += .45) castShadow(WALL_X, y, z, .42);
+  for (let x = WALL_X; x <= SIDE_X; x += .35) for (let z = .3; z <= A_H; z += .45) castShadow(x, WALL_Y, z, .42);
+  flushShadows();
+  bakeOcclusion();
+  staticShadow.set(shadowMask);
+  applyShadows(groundZ);
+  bakedPix.set(pix);
+  bakedZ.set(zb);
+}
+function fireEscape() {
+  const iron = () => IRON, out = WALL_X + .9;
+  for (const y0 of [-7.4, -.6]) {
+    for (let fl = 0; fl < 2; fl++) {
+      const z = 2.5 + fl * 2.05 - .12;
+      box(WALL_X, y0, z, out, y0 + 3.6, z + .08, IRON, fl);
+      dynamicAdd([out, y0, z + .78], [out, y0 + 3.6, z + .78], .035, .035, iron);
+      for (let y = y0; y <= y0 + 3.6 + 1e-6; y += .3) dynamicAdd([out, y, z + .08], [out, y, z + .78], .025, .025, iron);
+      if (fl === 0) { // a stair up to the next landing, a drop ladder below
+        dynamicAdd([WALL_X + .5, y0 + .4, z + .1], [WALL_X + .5, y0 + 2.8, z + 2.05], .04, .04, iron);
+        dynamicAdd([out - .1, y0 + 3.3, z], [out - .1, y0 + 3.3, 1.1], .03, .03, iron);
+      }
+    }
+  }
+}
+function waterTower(x, y, z0) {
+  const wood = z => (((z - z0) % .42) < .07 ? [70, 50, 38] : [134, 94, 62]);
+  for (const [dx, dy] of [[-.7, -.7], [.7, -.7], [-.7, .7], [.7, .7]]) dynamicAdd([x + dx, y + dy, z0], [x + dx * .8, y + dy * .8, z0 + 1.3], .06, .06, () => IRON);
+  capsule([x, y, z0 + 2.05], [x, y, z0 + 2.75], .95, .95, wood, 'rough');
+  for (let k = 0; k <= 6; k++) sphere(x, y, z0 + 3.1 + k * .13, .95 * (1 - k / 7), [78, 84, 80], 'rough');
+  for (let k = 0; k < 8; k++) castShadow(x, y, z0 + 1.3 + k * .3, .9);
+}
+function fence() {
+  const steel = () => [150, 154, 158], mesh = rgb(160, 164, 168), meshDark = rgb(108, 112, 118);
+  // chain-link: thin diamonds, wide enough apart that the court shows through
+  for (let y = WALL_Y; y <= WALK_Y; y += .03) for (let z = 0; z <= FENCE_H; z += .03) {
+    const a = ((y + z) / .75) % 1, b = ((y - z + 30) / .75) % 1;
+    if (a < .045 || b < .045) paintAt(FENCE_X, y, z, z > FENCE_H - .5 || hash(y * 40 | 0, z * 40 | 0) > .3 ? mesh : meshDark);
+  }
+  for (let y = WALL_Y; y <= WALK_Y + .01; y += 3.9) dynamicAdd([FENCE_X, y, 0], [FENCE_X, y, FENCE_H + .1], .07, .07, steel);
+  dynamicAdd([FENCE_X, WALL_Y, FENCE_H], [FENCE_X, WALK_Y, FENCE_H], .05, .05, steel);
+}
+function hoop() {
+  const rim = () => RIM_C;
+  // brackets from the wall
+  for (const z of [4.3, 5.1]) for (const dx of [-.6, .6]) dynamicAdd([HX + dx, WALL_Y, z], [HX + dx * .8, BOARD_Y - .1, z], .05, .05, () => IRON);
+  box(HX - BOARD_HW, BOARD_Y - .1, BOARD_Z0, HX + BOARD_HW, BOARD_Y, BOARD_Z1, [232, 232, 226], 2);
+  const red = rgb(196, 64, 46);
+  faceY(BOARD_Y + .002, HX - BOARD_HW, HX + BOARD_HW, BOARD_Z0, BOARD_Z1, (x, z) => {
+    const dx = Math.abs(x - HX), edge = dx > BOARD_HW - .07 || z < BOARD_Z0 + .07 || z > BOARD_Z1 - .07;
+    const sq = (Math.abs(dx - .42) < .05 && z > RZ + .02 && z < RZ + .62) || (dx < .42 && Math.abs(z - RZ - .62) < .05) || (dx < .42 && Math.abs(z - RZ - .06) < .05);
+    return edge || sq ? red : null;
+  });
+  dynamicAdd([HX, BOARD_Y, RZ], [HX, HY - RIM_R, RZ], .05, .05, rim);
+  const n = 22;
+  for (let k = 0; k < n; k++) {
+    const a0 = k / n * Math.PI * 2, a1 = (k + 1) / n * Math.PI * 2;
+    capsule([HX + Math.cos(a0) * RIM_R, HY + Math.sin(a0) * RIM_R, RZ], [HX + Math.cos(a1) * RIM_R, HY + Math.sin(a1) * RIM_R, RZ], TUBE, TUBE, rim, 'solid');
+  }
+  for (let x = HX - BOARD_HW; x <= HX + BOARD_HW; x += .3) castShadow(x, BOARD_Y, (BOARD_Z0 + BOARD_Z1) / 2, .5);
+}
+function props() {
+  // a parked cab
+  const cab = [236, 186, 40];
+  box(-6.2, 8.3, .3, -1.6, 9.7, 1, cab, 1);
+  box(-5.1, 8.45, 1, -2.6, 9.55, 1.6, cab, 2);
+  box(-4.1, 8.85, 1.6, -3.6, 9.15, 1.8, [242, 238, 222], 3);
+  box(-1.6, 8.35, .32, -1.48, 9.65, .55, [150, 150, 150], 4);
+  faceY(9.552, -5, -2.7, 1.08, 1.52, (x, z) => (Math.abs(x - 3.85 + 7.7) < .07 ? null : GLASS[x + z * .6 > -3.2 && x + z * .6 < -2.9 ? 2 : 0]));
+  faceX(-2.598, 8.55, 9.45, 1.06, 1.5, (y, z) => GLASS[(y + z) % 1.2 < .15 ? 2 : 1]);
+  faceY(9.702, -6.1, -1.7, .62, .74, x => ((Math.floor(x / .18) & 1) ? rgb(30, 28, 26) : rgb(240, 236, 222)));
+  faceX(-1.47, 8.5, 8.75, .62, .78, () => rgb(250, 246, 220));
+  faceX(-1.47, 9.25, 9.5, .62, .78, () => rgb(250, 246, 220));
+  for (const x of [-5.3, -2.5]) sphere(x, 9.72, .32, .32, [36, 34, 34], 'solid');
+  for (let x = -6.1; x <= -1.7; x += .3) castShadow(x, 9, .7, .75);
+  // hydrant, bin and a street lamp on the right-hand sidewalk
+  const red = () => [200, 46, 38];
+  dynamicAdd([9.4, 3.2, 0], [9.4, 3.2, .55], .17, .15, red);
+  dynamicAdd([9.4, 3.2, .6], [9.4, 3.2, .6], .14, .14, red);
+  dynamicAdd([9.4, 3.0, .38], [9.4, 3.42, .38], .07, .07, red);
+  dynamicAdd([9.4, -2, .08], [9.4, -2, .8], .3, .3, () => [52, 92, 64]);
+  const lamp = () => [52, 70, 58];
+  dynamicAdd([9.7, -6, 0], [9.7, -6, 6.2], .08, .06, lamp);
+  dynamicAdd([9.7, -6, 6.2], [8.6, -6, 6.35], .05, .05, lamp);
+  dynamicAdd([8.5, -6, 6.25], [8.5, -6, 6.25], .17, .17, () => [240, 226, 170]);
+  // a bench on the front sidewalk
+  const wood = [150, 104, 62];
+  box(-8, 6.25, .48, -5.2, 6.75, .56, wood, 5);
+  box(-8, 6.78, .62, -5.2, 6.88, 1.05, wood, 6);
+  for (const x of [-7.8, -5.5]) box(x, 6.3, 0, x + .12, 6.8, .48, IRON, 7);
+  for (let x = -8; x <= -5.2; x += .3) castShadow(x, 6.5, .5, .3);
+}
+
+/* ---------- game state ---------- */
+const SPOTS = [[0, 5.4], [-.95, 5.6], [.95, 5.6], [-.55, 7.2], [.55, 7.2], [-1.05, 9.9], [-.5, 10.1], [0, 10.2], [.5, 10.1], [1, 9.9]]
+  .map(([t, r]) => [HX + Math.sin(t) * r, HY + Math.cos(t) * r]);
+const G = {
+  phase: 'ready', time: 0, timer: 0, clock: GAME_T, started: false, ended: false,
+  spot: 0, from: null, pos: [...SPOTS[0]], score: 0, best: 0, streak: 0, made: 0, shots: 0,
+  charging: false, power: 0, yawOff: 0, pointer: null, keyCharge: false, keyT: 0, launched: false,
+  balls: [], trail: [], net: { t: -9, amp: 0 }, status: '',
+  def: { jumpAt: 2, t: -9 }, newBest: false,
+};
+try { G.best = +localStorage.getItem('pp-quadra-best') || 0; } catch { /* storage blocked */ }
+const nodes = { score: document.getElementById('score'), clock: document.getElementById('clock'), best: document.getElementById('best'), status: document.getElementById('status') };
+function renderHud() {
+  nodes.score.textContent = G.score;
+  const c = Math.ceil(G.clock);
+  nodes.clock.textContent = c + 's';
+  nodes.clock.classList.toggle('low', G.started && c <= 10);
+  nodes.best.textContent = 'recorde ' + G.best + (G.streak >= 3 ? ' · pegando fogo!' : '');
+}
+function setStatus(text) {
+  if (text === G.status) return;
+  G.status = text;
+  nodes.status.textContent = text;
+}
+const toRim = () => { const dx = HX - G.pos[0], dy = HY - G.pos[1], l = Math.hypot(dx, dy); return [dx / l, dy / l, l]; };
+const isThree = () => Math.hypot(G.pos[0] - HX, G.pos[1] - HY) > R3;
+const onFire = () => G.streak >= 3;
+
+/* ---------- the defender ---------- */
+// he shuffles across your line, dips, then leaps with both hands up
+function defenderState() {
+  const d = G.def, t = G.time - d.t;
+  const sway = STILL ? .2 : Math.sin(G.time * 1.7) * .55 + Math.sin(G.time * .63) * .2;
+  if (t >= 0 && t < .22) return { sway, mode: 'dip', u: t / .22, air: 0 };
+  if (t >= .22 && t < .82) { const u = (t - .22) / .6; return { sway, mode: 'jump', u, air: Math.sin(u * Math.PI) }; }
+  return { sway, mode: 'guard', u: 0, air: 0 };
+}
+function updateDefender() {
+  if (G.time >= G.def.jumpAt) { G.def.t = G.time; G.def.jumpAt = G.time + .82 + 1.1 + Math.random() * 1.6; }
+}
+function defenderSpot() {
+  const [fx, fy] = toRim(), s = defenderState();
+  return { x: G.pos[0] + fx * 1.9 - fy * s.sway, y: G.pos[1] + fy * 1.9 + fx * s.sway, fx: -fx, fy: -fy, s };
+}
+
+/* ---------- shooting ---------- */
+const gauss = () => (Math.random() + Math.random() + Math.random() - 1.5) * 1.15;
+const RELEASE_Z = 3.6;
+// one release point for the shot and its preview, so the dots never lie
+const releasePoint = () => { const [fx, fy] = toRim(); return [G.pos[0] + fx * .25, G.pos[1] + fy * .25, RELEASE_Z]; };
+function shotVelocity(power, yawOff) {
+  const [fx, fy] = toRim(), yaw = Math.atan2(fy, fx) + yawOff, v = lerp(7.6, 13.4, power);
+  return [Math.cos(yaw) * v * Math.cos(ELEV), Math.sin(yaw) * v * Math.cos(ELEV), v * Math.sin(ELEV)];
+}
+function release() {
+  G.charging = false; G.keyCharge = false; G.pointer = null;
+  if (G.power < .04 || G.ended) { G.power = 0; return; }
+  G.phase = 'shoot'; G.timer = 0; G.launched = false;
+  if (!G.started) { G.started = true; G.clock = GAME_T; }
+  setStatus('');
+}
+function launch() {
+  const ds = defenderSpot(), s = ds.s;
+  // contest: how squarely he is in your face and how high he is
+  const square = clamp(1 - Math.abs(s.sway) / .8, 0, 1), contest = s.mode === 'jump' ? square * (s.air > .35 ? 1 : .5) : square * .12;
+  let [vx, vy, vz] = shotVelocity(G.power, G.yawOff + gauss() * (.008 + contest * .07));
+  const k = 1 + gauss() * (.004 + contest * .05);
+  vx *= k; vy *= k; vz *= k;
+  const [rx, ry, rz] = releasePoint();
+  const ball = { x: rx, y: ry, z: rz, vx, vy, vz, pts: isThree() ? 3 : 2, scored: false, resolved: false, touched: false, age: 0, rest: 0, spin: 0, gone: false, fire: onFire() };
+  G.shots++;
+  if (contest > .55 && Math.random() < .6) { // swatted
+    const [fx, fy] = toRim();
+    ball.vx = -fx * 3 + -fy * gauss() * 4; ball.vy = -fy * 3 + fx * gauss() * 4; ball.vz = 2.5;
+    ball.resolved = true; ball.touched = true;
+    miss('toco! espere ele cair');
+    sound('block');
+  } else sound('whoosh');
+  G.balls.push(ball);
+  if (G.balls.length > 6) G.balls.shift();
+}
+function miss(text) {
+  G.streak = 0;
+  setStatus(text);
+  renderHud();
+}
+function score(ball) {
+  ball.scored = ball.resolved = true;
+  G.streak++; G.made++;
+  const bonus = ball.fire ? 1 : 0, pts = ball.pts + bonus;
+  G.score += pts;
+  G.net = { t: G.time, amp: ball.touched ? .5 : 1 };
+  let text = (ball.touched ? '' : 'chuá! ') + '+' + ball.pts + (bonus ? ' +1 fogo' : '');
+  if (G.streak === 3) text += ' · pegando fogo!';
+  setStatus(text);
+  sound(ball.touched ? 'score' : 'swish');
+  if (!ball.touched) sound('score', .6, .08);
+  renderHud();
+}
+function stepBall(b, dt) {
+  const px = b.x, py = b.y, pz = b.z;
+  b.vz -= GRAV * dt;
+  b.x += b.vx * dt; b.y += b.vy * dt; b.z += b.vz * dt;
+  b.spin += Math.hypot(b.vx, b.vy) * dt * 3;
+  // backboard front face
+  if (py - BALL_R >= BOARD_Y && b.y - BALL_R < BOARD_Y && Math.abs(b.x - HX) < BOARD_HW + BALL_R && b.z > BOARD_Z0 - BALL_R && b.z < BOARD_Z1 + BALL_R) {
+    b.y = BOARD_Y + BALL_R; b.vy = Math.abs(b.vy) * .55; b.touched = true;
+    sound('board', Math.min(1, Math.abs(b.vy) / 5));
+  }
+  // the rim, as the nearest point on its circle
+  const dx = b.x - HX, dy = b.y - HY, dh = Math.hypot(dx, dy) || 1e-6;
+  const qx = HX + dx / dh * RIM_R, qy = HY + dy / dh * RIM_R;
+  const nx = b.x - qx, ny = b.y - qy, nz = b.z - RZ, nd = Math.hypot(nx, ny, nz), minD = BALL_R + TUBE;
+  if (nd < minD && nd > 1e-6) {
+    const ux = nx / nd, uy = ny / nd, uz = nz / nd;
+    b.x += ux * (minD - nd); b.y += uy * (minD - nd); b.z += uz * (minD - nd);
+    const vn = b.vx * ux + b.vy * uy + b.vz * uz;
+    if (vn < 0) {
+      b.vx -= 1.5 * vn * ux; b.vy -= 1.5 * vn * uy; b.vz -= 1.5 * vn * uz;
+      b.vx *= .85; b.vy *= .85;
+      if (-vn > .8) sound('clank', Math.min(1, -vn / 6));
+    }
+    b.touched = true;
+  }
+  // through the hoop, downwards
+  if (!b.resolved && pz >= RZ && b.z < RZ && dh < RIM_R - BALL_R * .35) score(b);
+  if (b.scored && b.z < RZ && b.z > RZ - .8 && dh < RIM_R) { b.vx *= .96; b.vy *= .96; } // the net drags it
+  if (b.z < BALL_R) {
+    b.z = BALL_R;
+    if (!b.resolved) { b.resolved = true; miss(b.touched ? 'aro…' : 'airball'); }
+    if (b.vz < -1.2) { b.vz *= -.62; sound('bounce', Math.min(1, -b.vz / 6)); }
+    else b.vz = 0;
+    const f = Math.max(0, 1 - 1.1 * dt);
+    b.vx *= f; b.vy *= f;
+  }
+  // walls and the fence
+  if (b.y - BALL_R < WALL_Y && b.x > WALL_X) { b.y = WALL_Y + BALL_R; b.vy = Math.abs(b.vy) * .5; }
+  if (b.x - BALL_R < WALL_X && b.y < WALK_Y + 1.6) { b.x = WALL_X + BALL_R; b.vx = Math.abs(b.vx) * .5; }
+  if (px + BALL_R <= FENCE_X && b.x + BALL_R > FENCE_X && b.y < WALK_Y && b.z < FENCE_H) { b.x = FENCE_X - BALL_R; b.vx = -Math.abs(b.vx) * .3; }
+  if (b.y > STREET_Y1 + 1 || b.x > SIDE_X + 1) b.gone = true;
+}
+
+/* ---------- update ---------- */
+function update(dt) {
+  G.time += dt; G.timer += dt;
+  updateDefender();
+  if (G.started && !G.ended) {
+    G.clock = Math.max(0, G.clock - dt);
+    if (G.clock === 0) { G.ended = true; G.charging = false; G.keyCharge = false; sound('buzzer'); setStatus('fim de jogo!'); }
+  }
+  if (G.keyCharge) { G.keyT += dt; G.power = 1 - Math.abs(1 - (G.keyT / .7) % 2); } // ping-pong: let go at the right moment
+  if (G.phase === 'shoot') {
+    if (!G.launched && G.timer >= SHOOT_T * RELEASE_U) { G.launched = true; launch(); }
+    if (G.timer >= SHOOT_T) {
+      let next = G.spot;
+      while (next === G.spot) next = Math.random() * SPOTS.length | 0;
+      G.from = [...G.pos]; G.spot = next; G.phase = 'move'; G.timer = 0; G.power = 0;
+    }
+  } else if (G.phase === 'move') {
+    const u = clamp(G.timer / MOVE_T, 0, 1), to = SPOTS[G.spot];
+    G.pos = [lerp(G.from[0], to[0], ease(u)), lerp(G.from[1], to[1], ease(u))];
+    if (u >= 1) { G.phase = 'ready'; G.timer = 0; if (!G.ended && !G.status) setStatus(isThree() ? 'de fora: vale 3' : ''); }
+  }
+  for (const b of G.balls) {
+    b.age += dt;
+    for (let k = 0; k < 4; k++) stepBall(b, dt / 4);
+    if (b.z <= BALL_R + .01 && Math.hypot(b.vx, b.vy) < .3) b.rest += dt;
+    if (b.fire && !b.resolved && !STILL) G.trail.push({ x: b.x, y: b.y, z: b.z, life: .35 });
+  }
+  G.balls = G.balls.filter(b => !b.gone && b.rest < 1.8);
+  for (const t of G.trail) t.life -= dt;
+  G.trail = G.trail.filter(t => t.life > 0);
+  if (G.ended && G.phase !== 'over' && G.balls.every(b => b.resolved)) finish();
+  renderHud();
+}
+function finish() {
+  G.phase = 'over'; G.timer = 0;
+  G.newBest = G.score > G.best;
+  if (G.newBest) {
+    G.best = G.score;
+    try { localStorage.setItem('pp-quadra-best', String(G.best)); } catch { /* storage blocked */ }
+    // the poppers stand on the court in front of the hoop
+    if (window.PPFX && !STILL) { const p = project(HX, HY + 2, 0); window.PPFX.confetti(p.sx, p.sy); }
+  }
+  const pct = G.shots ? Math.round(G.made / G.shots * 100) : 0;
+  setStatus((G.newBest ? 'novo recorde! ' : '') + G.score + ' pontos · ' + G.made + '/' + G.shots + ' (' + pct + '%) · toque pra jogar de novo');
+  sound(G.newBest ? 'record' : 'score');
+  renderHud();
+}
+function reset() {
+  Object.assign(G, { phase: 'ready', timer: 0, clock: GAME_T, started: false, ended: false, score: 0, streak: 0, made: 0, shots: 0, balls: [], trail: [], power: 0, newBest: false, spot: 0, pos: [...SPOTS[0]] });
+  setStatus('arraste pra trás e solte pra arremessar');
+  renderHud();
+}
+
+/* ---------- drawing ---------- */
+function shooterPose() {
+  const t = G.time;
+  if (G.phase === 'shoot') {
+    const u = clamp(G.timer / SHOOT_T, 0, 1);
+    return { z: Math.sin(Math.min(1, u * 1.3) * Math.PI) * .45, thL: .05, knL: lerp(.9, .15, u), thR: .05, knR: lerp(.9, .15, u), lean: .05, alL: lerp(2.3, 2.6, u), bnL: lerp(.6, .1, u), beL: .25, alR: lerp(2.3, 2.75, u), bnR: lerp(.6, 0, u), beR: .2 };
+  }
+  if (G.phase === 'move') {
+    const ph = t * 15, th = Math.sin(ph) * .6;
+    return { thL: th, knL: .3 + Math.max(0, -th) * 1.2, thR: -th, knR: .3 + Math.max(0, th) * 1.2, lean: .2, alL: -th * .8, bnL: 1, alR: th * .8, bnR: 1, z: Math.abs(Math.cos(ph)) * .05 };
+  }
+  if (G.charging || G.keyCharge) {
+    const p = G.power;
+    return { thL: .3 + p * .25, knL: .7 + p * .5, thR: .3 + p * .25, knR: .7 + p * .5, lean: .1, alL: 2.3, bnL: .6, beL: .25, alR: 2.3, bnR: .6, beR: .2 };
+  }
+  // dribbling
+  const d = (t * 2.2) % 1, push = d < .5 ? d * 2 : 2 - d * 2;
+  return { thL: .2, knL: .4, thR: .2, knR: .4, lean: .15, alR: .35 + (1 - push) * .3, beR: .3, bnR: .8, alL: .2, beL: .2 };
+}
+function defenderPose(s) {
+  if (s.mode === 'jump') return { z: s.air * .75, thL: .05, knL: .15, thR: .05, knR: .15, lean: .02, alL: 2.95, beL: .15, bnL: 0, alR: 2.95, beR: .15, bnR: 0 };
+  const deep = s.mode === 'dip' ? Math.sin(s.u * Math.PI) * .45 : 0;
+  return { thL: .35 + deep * .3, knL: .8 + deep, thR: .35 + deep * .3, knR: .8 + deep, spL: .3, spR: .3, lean: .25 + deep * .3, alL: .6, beL: 1.1, bnL: .3, alR: .6, beR: 1.1, bnR: .3 };
+}
+function drawBall(x, y, z, spin) {
+  sphere(x, y, z, BALL_R, BALL_C, 'solid');
+  const p = project(x, y, z), ix = Math.round(p.sx + Math.cos(spin) * 1.1 - .5), iy = Math.round(p.sy - .5);
+  if (ix >= 0 && iy >= 0 && ix < W && iy < H && Math.abs(zb[iy * W + ix] - p.d) < BALL_R * 1.2) pix[iy * W + ix] = SEAM;
+  castShadow(x, y, z - BALL_R, BALL_R * .95, 1, 0);
+  if (z < BALL_R + .12) castShadow(x, y, 0, BALL_R * .7, 2, 0);
+}
+function drawNet() {
+  const age = G.time - G.net.t, amp = age < 1.2 ? G.net.amp * Math.exp(-age * 4) : 0;
+  const strands = 12, rows = 16;
+  for (let k = 0; k < strands; k++) for (let r = 0; r <= rows; r++) {
+    const t = r / rows, twist = (k & 1 ? 1 : -1) * t * .5;
+    for (const side of [0, twist]) {
+      const a = (k / strands) * Math.PI * 2 + side, rad = lerp(RIM_R, .19, t) * (1 + amp * .4 * Math.sin(age * 25 + t * 4) * t);
+      const z = RZ - t * .78 + amp * .25 * t * Math.max(0, Math.sin(age * 12));
+      const p = project(HX + Math.cos(a) * rad, HY + Math.sin(a) * rad, z), ix = p.sx | 0, iy = p.sy | 0;
+      if (ix < 0 || iy < 0 || ix >= W || iy >= H) continue;
+      const i = iy * W + ix;
+      if (p.d <= zb[i]) continue;
+      zb[i] = p.d;
+      pix[i] = NET_C;
+    }
+  }
+}
+function drawAim() {
+  if (G.power < .04) return;
+  const [vx, vy, vz0] = shotVelocity(G.power, G.yawOff), dots = [];
+  let [x, y, z] = releasePoint(), vz = vz0;
+  const full = toRim()[2], dt = .02;
+  for (let k = 0; k < 80; k++) {
+    x += vx * dt; y += vy * dt; vz -= GRAV * dt; z += vz * dt;
+    if (Math.hypot(x - G.pos[0], y - G.pos[1]) > full * .42) break; // only the first part: judging the rest is the game
+    if (k % 3 === 2) { const p = project(x, y, z); dots.push([p.sx, p.sy]); }
+  }
+  drawDots(dots, PAPER);
+}
+function draw() {
+  pix.set(bakedPix);
+  zb.set(bakedZ);
+  pendingShadows.length = 0;
+  const [fx, fy] = toRim();
+  const ds = defenderSpot();
+  rig(ds.x, ds.y, ds.fx, ds.fy, defenderPose(ds.s), DEF);
+  const hands = rig(G.pos[0], G.pos[1], fx, fy, shooterPose(), YOU);
+  const holding = G.phase === 'ready' || (G.phase === 'shoot' && !G.launched);
+  if (holding || G.phase === 'move') {
+    if (G.charging || G.keyCharge || G.phase === 'shoot') {
+      drawBall((hands.hL[0] + hands.hR[0]) / 2 + fx * .12, (hands.hL[1] + hands.hR[1]) / 2 + fy * .12, (hands.hL[2] + hands.hR[2]) / 2 + .16, 0);
+    } else if (G.phase === 'ready') {
+      const d = (G.time * 2.2) % 1, h = hands.hR, bz = lerp(h[2] - .1, BALL_R, d < .5 ? d * 2 : 2 - d * 2);
+      if (!G.dribbleDown && d >= .5) { G.dribbleDown = true; sound('dribble'); }
+      if (d < .5) G.dribbleDown = false;
+      drawBall(h[0] + fx * .2, h[1] + fy * .2, bz, G.time * 6);
+    }
+  }
+  for (const b of G.balls) drawBall(b.x, b.y, b.z, b.spin);
+  const windT = STILL ? 0 : Math.floor(G.time * WIND_FPS) / WIND_FPS;
+  drawLeaves(windT);
+  drawTufts(windT);
+  flushShadows();
+  applyShadows(bakedZ);
+  shadeEdges();
+  drawNet();
+  for (const t of G.trail) {
+    const p = project(t.x, t.y, t.z), c = FIRE[clamp(Math.floor((1 - t.life / .35) * 3), 0, 2)];
+    drawDots([[p.sx, p.sy], [p.sx + (t.life * 37 % 2 | 0), p.sy - 1]], c);
+  }
+  if (G.charging || G.keyCharge) drawAim();
+  if (G.phase === 'ready' && !G.started && !G.charging) drawArrow(project(G.pos[0], G.pos[1], 3.1).sx, project(G.pos[0], G.pos[1], 3.1).sy, G.time);
+  if (window.PPFX) window.PPFX.draw(G.time);
+  ctx.putImageData(image, 0, 0);
+}
+
+/* ---------- input ---------- */
+function toCanvas(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+}
+const canShoot = () => G.phase === 'ready' && !G.ended;
+canvas.addEventListener('pointerdown', e => {
+  ensureAudio();
+  canvas.focus({ preventScroll: true });
+  if (G.phase === 'over' && G.timer > .8) return reset();
+  if (!canShoot()) return;
+  canvas.setPointerCapture(e.pointerId);
+  G.pointer = toCanvas(e); G.charging = true; G.power = 0; G.yawOff = 0;
+});
+canvas.addEventListener('pointermove', e => {
+  if (!G.charging || !G.pointer) return;
+  const p = toCanvas(e), dx = (p.x - G.pointer.x) / S, dy = (p.y - G.pointer.y) / (S * SIN);
+  const wx = (dx + dy) / R2, wy = (dy - dx) / R2, len = Math.hypot(wx, wy);
+  G.power = clamp(len / 12, 0, 1);
+  if (len > .5) {
+    const [fx, fy] = toRim(), want = Math.atan2(-wy, -wx), base = Math.atan2(fy, fx);
+    let off = want - base;
+    off = Math.atan2(Math.sin(off), Math.cos(off));
+    G.yawOff = clamp(off, -.6, .6) * .25; // pulled mostly onto the rim: distance is the skill here
+  }
+});
+canvas.addEventListener('pointerup', () => { if (G.charging && G.pointer) release(); });
+canvas.addEventListener('pointercancel', () => { G.charging = false; G.pointer = null; G.power = 0; });
+canvas.addEventListener('keydown', e => {
+  ensureAudio();
+  if (e.key !== ' ' && e.key !== 'Enter') return;
+  e.preventDefault();
+  if (e.repeat) return;
+  if (G.phase === 'over' && G.timer > .8) return reset();
+  if (canShoot() && !G.charging) { G.keyCharge = true; G.keyT = 0; G.power = 0; G.yawOff = 0; }
+});
+canvas.addEventListener('keyup', e => { if ((e.key === ' ' || e.key === 'Enter') && G.keyCharge) release(); });
+
+/* ---------- sound ---------- */
+let audio = null, muted = false;
+function ensureAudio() {
+  if (audio) { if (audio.state === 'suspended') audio.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (AC) audio = new AC();
+}
+const SOUNDS = {
+  dribble: [[130, 70, .07, .16, 'sine']],
+  bounce: [[140, 70, .08, .25, 'sine']],
+  whoosh: [[300, 520, .12, .03, 'triangle']],
+  clank: [[880, 700, .16, .1, 'square'], [1320, 1180, .12, .05, 'triangle']],
+  board: [[210, 120, .1, .25, 'triangle']],
+  swish: [[700, 260, .2, .045, 'sawtooth']],
+  score: [[587, 587, .1, .07, 'triangle'], [880, 880, .16, .07, 'triangle', .09]],
+  block: [[150, 60, .14, .35, 'square']],
+  buzzer: [[196, 190, .8, .1, 'square']],
+  record: [[523, 523, .1, .08, 'triangle'], [659, 659, .1, .08, 'triangle', .1], [784, 784, .1, .08, 'triangle', .2], [1046, 1046, .3, .08, 'triangle', .3]],
+};
+function sound(kind, amount = .6, delay = 0) {
+  if (!audio || muted) return;
+  const scaleVol = kind === 'bounce' || kind === 'clank' || kind === 'board' ? amount + .2 : 1;
+  for (const [f0, f1, len, vol, type, at = 0] of SOUNDS[kind]) {
+    const now = audio.currentTime + delay + at, gain = audio.createGain(), osc = audio.createOscillator();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f0, now);
+    osc.frequency.exponentialRampToValueAtTime(f1, now + len);
+    gain.gain.setValueAtTime(vol * scaleVol, now);
+    gain.gain.exponentialRampToValueAtTime(.0005, now + len);
+    osc.connect(gain).connect(audio.destination);
+    osc.start(now); osc.stop(now + len + .01);
+  }
+}
+const muteButton = document.getElementById('mute');
+muteButton.addEventListener('click', () => {
+  muted = !muted;
+  muteButton.textContent = muted ? 'som desligado' : 'som ligado';
+  muteButton.setAttribute('aria-pressed', String(muted));
+});
+
+/* ---------- boot ---------- */
+addEventListener('resize', fit);
+fit();
+bake();
+reset();
+let last = performance.now();
+function frame(now) {
+  update(Math.min(.04, (now - last) / 1000));
+  last = now;
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+window.__quadra = { G, step(dt, skipDraw) { update(dt); if (!skipDraw) draw(); } };
+</script>
+<script type="module">
+// Confetti from pixelfx (https://github.com/patch-gg/pixelfx, MIT) for a new record.
+import { createFrame, clearFrame, createFx, composite } from '../vendor/pixelfx/core/index.js';
+import * as confetti from '../vendor/pixelfx/fx/ui/confetti.js';
+
+const frame = createFrame(W, H), live = [];
+let last = null;
+window.PPFX = {
+  confetti(x, y) {
+    live.push(createFx(confetti, { x: Math.round(x), y: Math.round(y), seed: Math.random() * 1e6 | 0, light: .45 }));
+  },
+  draw(time) {
+    const dt = last === null ? 0 : Math.min(.05, Math.max(0, time - last));
+    last = time;
+    if (!live.length) return;
+    clearFrame(frame);
+    for (const fx of live) { fx.update(dt); fx.draw(frame); }
+    composite(frame, image.data, pix); // pix aliases image.data; composite reads each pixel before writing it
+    for (let i = live.length - 1; i >= 0; i--) if (live[i].done()) live.splice(i, 1);
+  },
+};
+</script>
+</body>
+</html>
