@@ -1,6 +1,12 @@
-# Pênalti
+# Pixel Plays
 
-Disputa de pênaltis em pixel art isométrico, no navegador. JavaScript puro com rasterizador próprio: sem build, sem dependências, sem sprites.
+Jogos de navegador em pixel art isométrico. JavaScript puro com rasterizador próprio: sem build, sem dependências, sem sprites.
+
+## Jogos
+| Jogo | O que fazer | Controle |
+|------|-------------|----------|
+| [Pênalti](penalti/) | Disputa de pênaltis: bata 5 e defenda 5, depois alternadas | Mire, segure e solte; no gol, toque onde pular |
+| [Quadra NY](quadra/) | 60 segundos numa quadra de rua em Nova York, com marcador | Arraste pra trás e solte; espaço |
 
 ## Rodar
 Requer [Node.js](https://nodejs.org/).
@@ -11,11 +17,7 @@ node serve.mjs
 
 Abra http://127.0.0.1:5300/. Qualquer servidor de arquivos estáticos serve.
 
-## Como jogar
-- **Batendo:** mire no gol com o mouse ou o dedo, segure para encher a força e solte para chutar. Força demais manda a bola por cima. Teclado: setas miram, segure espaço.
-- **No gol:** toque no ponto do gol para onde quer pular. Pular antes do chute deixa o batedor trocar de canto. Teclado: ← → ↑ ↓.
-- 5 cobranças para cada lado, depois alternadas.
-
 ## Créditos
 - `engine.js` e `shell.js` vêm do [Pixel Plays](https://github.com/amirmushichge/pixel-plays) de Amir Mushich, sob licença MIT (ver [LICENSE](LICENSE)).
-- O jogo (`penalti/`) foi feito por Pedro.
+- `vendor/pixelfx/` vem do [pixelfx](https://github.com/patch-gg/pixelfx), sob licença MIT (ver [vendor/pixelfx/LICENSE](vendor/pixelfx/LICENSE)).
+- Os jogos (`penalti/`, `quadra/`) foram feitos por Pedro.
